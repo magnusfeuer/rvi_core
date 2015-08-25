@@ -60,6 +60,7 @@
 
 
 start_link() ->
+    create_tabs(),
     gen_server:start_link({local, ?SERVER}, ?MODULE, [], []).
 
 
@@ -74,14 +75,19 @@ init([]) ->
     ?notice("---- Service Edge URL:          ~p", [ URL ]),
     ?notice("---- Node Service Prefix:       ~s", [ rvi_common:local_service_prefix()]),
 
-    ets:new(?SERVICE_TABLE, [ set, public, named_table, 
-			     { keypos, #service_entry.service }]),
-
     service_discovery_rpc:subscribe(CompSpec, ?MODULE),
     {ok, #st {
 	    cs = CompSpec
 	   }}.
 
+create_tabs() ->
+    case ets:info(?SERVICE_TABLE, name) of
+	undefined ->
+	    ets:new(?SERVICE_TABLE, [public, named_table,
+				     {keypos, #service_entry.service}]);
+	_ ->
+	    true
+    end.
 
 start_json_server() ->
     ?debug("service_edge_rpc:start_json_server()"),
@@ -184,7 +190,16 @@ handle_websocket(WSock, Mesg, Arg) ->
 
 
 %% Websocket interface
-handle_ws_json_rpc(WSock, "message", Params, _Arg ) ->
+handle_ws_json_rpc(WSock, Msg, Params, Arg) ->
+    try handle_ws_json_rpc_(WSock, Msg, Params, Arg)
+    catch
+	error:E ->
+	    ?debug("handle_ws_json_rpc(_,~p,~p,_)~n", [Msg, Params]),
+	    ?debug("ERROR:~p/~p~n", [E, erlang:get_stacktrace()]),
+	    {ok, [{status, rvi_common:json_rpc_status(internal)}]}
+    end.
+
+handle_ws_json_rpc_(WSock, "message", Params, _Arg ) ->
     { ok, SvcName } = rvi_common:get_json_element(["service_name"], Params),
     { ok, Timeout } = rvi_common:get_json_element(["timeout"], Params),
     { ok, Parameters } = rvi_common:get_json_element(["parameters"], Params),
@@ -193,14 +208,19 @@ handle_ws_json_rpc(WSock, "message", Params, _Arg ) ->
     ?debug("service_edge_rpc:handle_websocket(~p) service:      ~p", [ WSock, SvcName ]),
     ?debug("service_edge_rpc:handle_websocket(~p) parameters:   ~p", [ WSock, Parameters ]),
 
-    [ Res, TID ] = gen_server:call(?SERVER, { rvi, handle_local_message, 
-					      [ SvcName, Timeout, [{struct, Parameters}]]}),
+    case gen_server:call(
+	   ?SERVER,
+	   {rvi, handle_local_message, 
+	    [ SvcName, Timeout, [{struct, Parameters}]]}) of
+	[not_found] ->
+	    {ok, [{status, rvi_common:json(not_found)}]};
+	[Res, TID] ->
+	    ?debug("service_edge_rpc:wse_message(~p) Res:      ~p", [ WSock, Res ]),
+	    { ok, [ { status, rvi_common:json_rpc_status(Res) }, 
+		    { transaction_id, TID} ] }
+    end;
 
-    ?debug("service_edge_rpc:wse_message(~p) Res:      ~p", [ WSock, Res ]),
-    { ok, [ { status, rvi_common:json_rpc_status(Res) }, 
-	    { transaction_id, TID} ] };
-
-handle_ws_json_rpc(WSock, "register_service", Params,_Arg ) ->
+handle_ws_json_rpc_(WSock, "register_service", Params,_Arg ) ->
     { ok, SvcName } = rvi_common:get_json_element(["service_name"], Params),
     ?debug("service_edge_rpc:websocket_register(~p) service:     ~p", [ WSock, SvcName ]),
     [ok, FullSvcName ] = gen_server:call(?SERVER, 
@@ -212,13 +232,13 @@ handle_ws_json_rpc(WSock, "register_service", Params,_Arg ) ->
     { ok, [ { status, rvi_common:json_rpc_status(ok)}, 
 	    { service, FullSvcName }]};
 
-handle_ws_json_rpc(WSock, "unregister_service", Params, _Arg ) ->
+handle_ws_json_rpc_(WSock, "unregister_service", Params, _Arg ) ->
     { ok, SvcName } = rvi_common:get_json_element(["service_name"], Params),
     ?debug("service_edge_rpc:websocket_unregister(~p) service:    ~p", [ WSock, SvcName ]),
     gen_server:call(?SERVER, { rvi, unregister_local_service, [ SvcName ]}),
     { ok, [ { status, rvi_common:json_rpc_status(ok)} ]};
 
-handle_ws_json_rpc(_Ws , "get_available_services", _Params, _Arg ) ->
+handle_ws_json_rpc_(_Ws , "get_available_services", _Params, _Arg ) ->
     ?debug("service_edge_rpc:websocket_get_available()"),
     [ Services ] = gen_server:call(?SERVER, { rvi, get_available_services, []}),
     { ok, [ { status, rvi_common:json_rpc_status(ok)},
