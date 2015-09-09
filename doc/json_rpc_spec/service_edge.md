@@ -34,7 +34,7 @@ it will silently be dropped.
 
 ### Parameters
 
-x ```timeout```<br>
+**```timeout```**<br>
 Test
 
 
